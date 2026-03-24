@@ -183,18 +183,28 @@ class WSClient:
         except Exception as e:
             logger.error("[WS] on_message error: %s", e)
 
+    async def _send_dm_async(self, to_npub: str, content: str):
+        """Internal async send. Catches connection errors gracefully."""
+        if not self._ws or not self._running:
+            logger.warning("[WS] _send_dm_async: not connected or not running")
+            return
+        try:
+            await self._ws.send(json.dumps({
+                "type": "dm",
+                "from_npub": self._npub,
+                "to_npub": to_npub,
+                "content": content,
+            }))
+            logger.info("[WS] DM sent to=%s content=%s", to_npub[:20], content[:50])
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("[WS] DM send failed: connection closed")
+        except Exception as e:
+            logger.warning("[WS] DM send failed: %s", e)
+
     def send_dm(self, to_npub: str, content: str):
         """Fire-and-forget send DM. Non-blocking."""
-        if not self._ws or not self._running:
-            logger.warning("[WS] send_dm: not connected or not running")
-            return
         if not self._npub:
             logger.warning("[WS] send_dm: not registered yet")
             return
-        asyncio.create_task(self._ws.send(json.dumps({
-            "type": "dm",
-            "from_npub": self._npub,
-            "to_npub": to_npub,
-            "content": content,
-        })))
+        asyncio.create_task(self._send_dm_async(to_npub, content))
         logger.info("[WS] DM queued to=%s content=%s", to_npub[:20], content[:50])
