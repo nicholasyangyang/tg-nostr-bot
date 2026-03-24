@@ -68,27 +68,54 @@ class WSClient:
         return True
 
     async def run(self):
-        """Listen for messages from Gateway."""
+        """Listen for messages from Gateway, auto-reconnect on disconnect."""
         self._running = True
-        try:
-            async for raw in self._ws:
-                msg = json.loads(raw)
-                msg_type = msg.get("type", "")
+        while self._running:
+            try:
+                async for raw in self._ws:
+                    msg = json.loads(raw)
+                    msg_type = msg.get("type", "")
 
-                if msg_type == "pong":
-                    continue
-                elif msg_type == "ping":
-                    await self._ws.send(json.dumps({"type": "pong"}))
-                elif msg_type == "dm":
-                    if self.on_message:
-                        asyncio.create_task(self._safe_callback(msg))
-                elif msg_type == "dm_received":
-                    # Gateway acknowledges sent DM
-                    pass
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("[WS] Connection closed")
-        finally:
-            self._running = False
+                    if msg_type == "pong":
+                        continue
+                    elif msg_type == "ping":
+                        await self._ws.send(json.dumps({"type": "pong"}))
+                    elif msg_type == "dm":
+                        if self.on_message:
+                            asyncio.create_task(self._safe_callback(msg))
+                    elif msg_type == "dm_received":
+                        pass
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"[WS] Connection closed: {e}, reconnecting in 5s...")
+                await asyncio.sleep(5)
+                if not self._running:
+                    break
+                # Try to reconnect
+                try:
+                    self._ws = await websockets.connect(self.gateway_url)
+                    # Re-register
+                    npub = ""
+                    if Path(KEY_PATH).exists():
+                        try:
+                            with open(KEY_PATH) as f:
+                                npub = json.load(f).get("npub", "")
+                        except Exception:
+                            pass
+                    if npub:
+                        await self._ws.send(json.dumps({"type": "register", "npub": npub}))
+                        resp = json.loads(await self._ws.recv())
+                        if resp.get("type") == "registered":
+                            logger.info("[WS] Reconnected and registered")
+                        else:
+                            logger.warning("[WS] Reconnect register unexpected response")
+                    else:
+                        logger.warning("[WS] No npub for reconnection")
+                except Exception as e2:
+                    logger.error(f"[WS] Reconnect failed: {e2}, retrying in 10s...")
+                    await asyncio.sleep(10)
+            except Exception as e:
+                logger.error(f"[WS] Unexpected error: {e}")
+                await asyncio.sleep(5)
 
     async def _safe_callback(self, msg: dict):
         try:
@@ -99,6 +126,14 @@ class WSClient:
 
     def send_dm(self, to_npub: str, content: str):
         """Fire-and-forget send DM. Must be called from async context."""
-        if not self._ws:
+        if not self._ws or not self._running:
             return
-        asyncio.create_task(self._ws.send(json.dumps({"type": "dm", "to_npub": to_npub, "content": content})))
+        try:
+            asyncio.create_task(self._ws.send(json.dumps({"type": "dm", "to_npub": to_npub, "content": content})))
+        except Exception as e:
+            logger.error(f"[WS] send_dm failed: {e}")
+
+    async def disconnect(self):
+        self._running = False
+        if self._ws:
+            await self._ws.close()

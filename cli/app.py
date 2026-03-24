@@ -89,8 +89,8 @@ async def lifespan(app: FastAPI):
     if _state:
         if _state.http_client:
             await _state.http_client.aclose()
-        if _state.ws_client and _state.ws_client._ws:
-            await _state.ws_client._ws.close()
+        if _state.ws_client:
+            await _state.ws_client.disconnect()
 
 app = FastAPI(title="tg-nostr-bot CLI", lifespan=lifespan)
 
