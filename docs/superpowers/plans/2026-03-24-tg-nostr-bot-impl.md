@@ -4,7 +4,7 @@
 
 **Goal:** A Telegram-Nostr bridge. Each CLI bridges a Telegram Bot to Nostr via a shared Gateway. Multiple CLI instances each have an independent npub, routed by to_npub.
 
-**Architecture:** Gateway = WebSocket server (accepts CLI connections) + Nostr relay pool (connects to public relays, subscribes kind:1059). CLI = FastAPI webhook (receives TG updates) + WebSocket client (sends/receives via Gateway). Both share key_manager (NIP-44/NIP-17). Gateway manages all_key.json; CLI saves local key.json.
+**Architecture:** Gateway = WebSocket server (accepts CLI connections) + Nostr relay pool (connects to public relays, subscribes kind:1059) + **ALL crypto** (owns all keys, does NIP-17 wrap/unwrap). CLI = FastAPI webhook (receives TG updates) + WebSocket client (raw text passthrough, no crypto). Both share key_manager (NIP-44/NIP-17). Gateway manages all_key.json; CLI saves local key.json.
 
 **Tech Stack:** Python 3.12, asyncio, websockets, aiohttp, fastapi, uvicorn, httpx, secp256k1, bech32, cryptography
 
@@ -25,8 +25,7 @@
 | `gateway/main.py` | Entry point | — |
 | `gateway/.env.example` | Config template | — |
 | `cli/config.py` | .env loader for cli | — |
-| `cli/ws_client.py` | WS client, key reg | — |
-| `cli/nip17_client.py` | NIP-17 wrap/unwrap | Uses shared/key_manager |
+| `cli/ws_client.py` | WS client, key reg, raw text passthrough | — |
 | `cli/app.py` | FastAPI Webhook | Adapt from tg_bot |
 | `cli/main.py` | Entry point | — |
 | `cli/.env.example` | Config template | — |
@@ -173,24 +172,6 @@ Since `shared/` is at the project root, create import helpers:
 
 ```python
 # gateway/key_manager.py
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from shared.key_manager import *
-```
-
-```python
-# gateway/relay_client.py
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from shared.relay_client import *
-```
-
-Actually, for cleaner imports, use relative paths in the entry script instead. Let's keep gateway/key_manager.py and gateway/relay_client.py as thin re-export wrappers:
-
-```python
-# gateway/key_manager.py
 """Re-export shared key_manager."""
 import sys
 from pathlib import Path
@@ -203,7 +184,7 @@ from shared.key_manager import (
     nip44_encrypt, nip44_decrypt,
     nip17_wrap_message, nip17_unwrap,
     KIND_NIP17_GIFT_WRAP, KIND_NIP17_SEAL, KIND_NIP17_TEXT_MSG,
-    sign_event, _event_id,
+    sign_event,
 )
 ```
 
@@ -326,8 +307,7 @@ class GatewayHandler:
                 logger.warning(f"[Gateway] No seckey for npub_hex={to_npub_hex[:16]}..., dropping")
                 return
 
-            # Unwrap NIP-17
-            from gateway.key_manager import nip17_unwrap
+            # Import at module level above (nip17_unwrap)
             rumor = nip17_unwrap(event, seckey, sender_pubkey)
             if not rumor:
                 logger.warning("[Gateway] Failed to unwrap NIP-17 DM")
@@ -398,7 +378,7 @@ class GatewayHandler:
         if not client or not client.npub_hex:
             return {"type": "error", "error": "not registered"}
 
-        from gateway.key_manager import nsec_to_hex
+        # nsec_to_hex already imported at module level
         seckey = None
         for k in self._all_keys.values():
             if npub_to_hex(k["npub"]) == client.npub_hex:
@@ -560,7 +540,6 @@ EOF
 **Files:**
 - Create: `tg-nostr-bot/cli/config.py`
 - Create: `tg-nostr-bot/cli/ws_client.py`
-- Create: `tg-nostr-bot/cli/nip17_client.py`
 - Create: `tg-nostr-bot/cli/app.py`
 - Create: `tg-nostr-bot/cli/main.py`
 - Create: `tg-nostr-bot/cli/.env.example`
@@ -608,7 +587,8 @@ from pathlib import Path
 
 logger = logging.getLogger("cli")
 
-KEY_PATH = Path(__file__).resolve().parent / "key.json"
+# KEY_PATH imported from config to respect .env setting
+from cli.config import KEY_PATH
 
 
 class WSClient:
@@ -708,25 +688,9 @@ class WSClient:
         asyncio.create_task(self._ws.send(json.dumps(msg)))
 ```
 
-- [ ] **Step 3: Create cli/nip17_client.py**
+- [ ] **Step 3: Create cli/app.py**
 
-```python
-"""NIP-17 helpers for CLI. Reuses shared key_manager."""
-import sys
-from pathlib import Path
-
-_parent = Path(__file__).resolve().parent.parent
-if str(_parent) not in sys.path:
-    sys.path.insert(0, str(_parent))
-
-from shared.key_manager import nip44_encrypt, nip44_decrypt
-from shared.key_manager import nip17_wrap_message, nip17_unwrap
-from shared.key_manager import nsec_to_hex, npub_to_hex, hex_to_npub, KIND_NIP17_GIFT_WRAP
-```
-
-No additional code needed — all functions are re-exported from shared.
-
-- [ ] **Step 4: Create cli/app.py**
+CLI is pure passthrough — no crypto, no nip17_client. Raw text only.
 
 Adapt from tg_bot/main.py. Key changes:
 - Import `send_message` and `handle_update` from this module
@@ -756,7 +720,6 @@ import httpx
 
 from cli.config import BOT_TOKEN, WEBHOOK_URL, ALLOWED_USERS, PORT, GATEWAY_WS_URL, KEY_PATH, LOG_LEVEL
 from cli.ws_client import WSClient
-import cli.nip17_client as nip17
 
 logger = logging.getLogger("cli")
 
@@ -924,7 +887,7 @@ app = FastAPI(lifespan=lifespan)
 
 Choose the style based on the installed FastAPI version.
 
-- [ ] **Step 5: Create cli/main.py**
+- [ ] **Step 4: Create cli/main.py**
 
 ```python
 """CLI entry point: python -m cli.main"""
@@ -953,7 +916,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 6: Create cli/.env.example**
+- [ ] **Step 5: Create cli/.env.example**
 
 ```
 BOT_TOKEN=your_telegram_bot_token
@@ -966,7 +929,7 @@ KEY_PATH=./key.json
 LOG_LEVEL=INFO
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add cli/
@@ -974,9 +937,8 @@ git commit -m "$(cat <<'EOF'
 feat: add CLI core
 
 - cli/config.py: .env loader (BOT_TOKEN, WEBHOOK_URL, GATEWAY_WS_URL, MSG_TO)
-- cli/ws_client.py: WS client, key registration, DM send/receive
-- cli/nip17_client.py: re-exports shared/key_manager (NIP-17 helpers)
-- cli/app.py: FastAPI webhook, Telegram handler, Nostr DM handler
+- cli/ws_client.py: WS client, key registration, raw text passthrough
+- cli/app.py: FastAPI webhook, pure passthrough (no crypto)
 - cli/main.py: entry point (python -m cli.main)
 - cli/.env.example: config template
 EOF
