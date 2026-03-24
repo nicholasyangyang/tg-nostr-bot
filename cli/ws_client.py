@@ -7,15 +7,16 @@ from pathlib import Path
 
 from typing import Optional
 
-from cli.config import KEY_PATH, GATEWAY_WS_URL
+from cli.config import GATEWAY_WS_URL
 
 logger = logging.getLogger("cli")
 
 
 class WSClient:
-    def __init__(self, gateway_url: str, on_message: callable):
+    def __init__(self, gateway_url: str, on_message: callable, key_path: str):
         self.gateway_url = gateway_url
         self.on_message = on_message  # callback(msg: dict)
+        self._key_path = key_path
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
         self._npub = ""
@@ -35,9 +36,9 @@ class WSClient:
             return False
 
         npub = ""
-        if Path(KEY_PATH).exists():
+        if Path(self._key_path).exists():
             try:
-                with open(KEY_PATH) as f:
+                with open(self._key_path) as f:
                     key_data = json.load(f)
                 npub = key_data.get("npub", "")
             except Exception:
@@ -49,8 +50,8 @@ class WSClient:
             if resp.get("type") == "register_done":
                 npub = resp["npub"]
                 nsec = resp["nsec"]
-                Path(KEY_PATH).parent.mkdir(parents=True, exist_ok=True)
-                with open(KEY_PATH, "w") as f:
+                Path(self._key_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(self._key_path, "w") as f:
                     json.dump({"npub": npub, "nsec": nsec}, f)
                 logger.info(f"[WS] Key saved: {npub[:30]}...")
             else:

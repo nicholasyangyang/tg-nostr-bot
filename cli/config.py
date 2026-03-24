@@ -18,5 +18,5 @@ ALLOWED_USERS: set[int] = {
 PORT: int = int(os.getenv("PORT", "8000"))
 GATEWAY_WS_URL: str = os.getenv("GATEWAY_WS_URL", "ws://127.0.0.1:7899")
 MSG_TO: str = os.getenv("MSG_TO", "")   # npub bech32, default destination
-KEY_PATH: str = os.getenv("KEY_PATH", "./key.json")
+KEY_PATH: str = os.getenv("KEY_PATH", "key.json")
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

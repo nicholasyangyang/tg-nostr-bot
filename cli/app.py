@@ -15,7 +15,7 @@ from typing import Optional
 
 import httpx
 
-from cli.config import BOT_TOKEN, WEBHOOK_URL, ALLOWED_USERS, PORT, GATEWAY_WS_URL, MSG_TO, LOG_LEVEL
+from cli.config import BOT_TOKEN, WEBHOOK_URL, ALLOWED_USERS, PORT, GATEWAY_WS_URL, MSG_TO, KEY_PATH, LOG_LEVEL
 from cli.ws_client import WSClient
 
 logger = logging.getLogger("cli")
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
             content = msg.get("content", "")
             await _state.send_message(chat_id, f"[{from_npub[:16]}...]: {content}")
 
-    ws = WSClient(GATEWAY_WS_URL, on_message=on_dm)
+    ws = WSClient(GATEWAY_WS_URL, on_message=on_dm, key_path=str(_state.cwd_dir / KEY_PATH))
     if await ws.connect_and_register():
         _state.ws_client = ws
         asyncio.create_task(ws.run())
