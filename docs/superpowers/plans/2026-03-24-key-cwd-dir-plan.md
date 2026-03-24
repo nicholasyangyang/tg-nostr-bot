@@ -118,25 +118,48 @@ from cli.config import KEY_PATH
 key_path = str(Path(BOT_TOKEN).parent / KEY_PATH)  # WRONG - need to pass from main
 ```
 
-Wait — `cli/app.py` doesn't have `--cwd-dir` visibility. The cleanest approach: compute `key_path` in `main()` and store it in a module-level variable or pass via `AppState`.
+Wait — `cli/app.py` doesn't have `--cwd-dir` visibility. The cleanest approach: pass `cwd_dir` via `AppState` from `cli/main.py` → uvicorn startup.
 
-Best approach: store `cwd_dir` as a global in `cli/main.py`, then `cli/app.py` imports it.
+**NOTE: Do NOT use `from cli.main import CWD_DIR` — that would cause a circular import** because `cli/main.py` imports `cli/app.py` via uvicorn. Instead:
 
 ```python
-# cli/main.py — add module-level variable
-CWD_DIR: Path = None
+# cli/app.py
+class AppState:
+    def __init__(self, cwd_dir: Path):
+        self.cwd_dir = cwd_dir
+        self.http_client: httpx.AsyncClient = httpx.AsyncClient(timeout=10.0)
+        self.ws_client: Optional[WSClient] = None
+        self.user_chat_ids: dict[int, int] = {}
 
-# after parsing:
-CWD_DIR = cwd_dir
+_state: Optional[AppState] = None
+
+def get_state() -> AppState:
+    return _state
 ```
 
 ```python
-# cli/app.py lifespan()
-from cli.main import CWD_DIR
-from cli.config import KEY_PATH
-key_path = str(CWD_DIR / KEY_PATH)
-ws = WSClient(GATEWAY_WS_URL, on_message=on_dm, key_path=key_path)
+# cli/main.py
+from cli.app import AppState
+cwd_dir = Path(args.cwd_dir).resolve()
+cwd_dir.mkdir(parents=True, exist_ok=True)
+state = AppState(cwd_dir)
+# Set module-level _state before uvicorn starts so lifespan() can read it
+import cli.app
+cli.app._state = state
+uvicorn.run("cli.app:app", ...)
 ```
+
+In `cli/app.py` `lifespan()`:
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _state
+    cwd_dir = _state.cwd_dir
+    key_path = str(cwd_dir / KEY_PATH)
+    # ...
+```
+
+Also: **Remove** the existing `KEY_PATH=./key.json` line from `cli/.env.example` in Task 3 (replaced by `CWD_DIR`). The plan's Task 3 step should say "replace" not "add".
 
 - [ ] **Step 5: Commit**
 
@@ -151,22 +174,29 @@ git commit -m "feat(cli): key_path derived from --cwd-dir + KEY_PATH filename"
 
 **Files:** Modify: `cli/.env.example`
 
-- [ ] **Step 1: Update .env.example**
+- [ ] **Step 1: Replace .env.example content**
+
+The existing `KEY_PATH=./key.json` line is removed (no longer used — path is derived from `--cwd-dir`). Replace with:
 
 ```bash
-# .env.example
 # Required: data directory (absolute path)
 CWD_DIR=/path/to/data
 
 # Bot token from @BotFather
 BOT_TOKEN=...
+WEBHOOK_URL=https://your-domain.com/webhook
+PORT=8000
+GATEWAY_WS_URL=ws://127.0.0.1:7599
+ALLOWED_USERS=123456789
+MSG_TO=npub1...
+LOG_LEVEL=INFO
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
 git add cli/.env.example
-git commit -m "docs(cli): add CWD_DIR to .env.example"
+git commit -m "docs(cli): replace KEY_PATH with CWD_DIR in .env.example"
 ```
 
 ---
@@ -227,16 +257,27 @@ ALL_KEY_PATH: str = os.getenv("ALL_KEY_PATH", "all_key.json")
 
 - [ ] **Step 2: Update WebSocketServer.__init__ signature**
 
+Current signature:
 ```python
-# gateway/websocket_server.py
-class WebSocketServer:
-    def __init__(
-        self,
-        cwd_dir: Path,  # required, from --cwd-dir
-    ):
-        self.cwd_dir = cwd_dir
-        self.key_path = cwd_dir / ALL_KEY_PATH
-        self.handler = GatewayMessageHandler(str(self.key_path))
+def __init__(
+    self,
+    host: str = GATEWAY_HOST,
+    port: int = GATEWAY_PORT,
+    key_path: str = ALL_KEY_PATH,
+):
+```
+
+New signature — replace `key_path` with `cwd_dir`:
+```python
+def __init__(
+    self,
+    cwd_dir: Path,
+    host: str = GATEWAY_HOST,
+    port: int = GATEWAY_PORT,
+):
+    self.cwd_dir = cwd_dir
+    self.key_path = cwd_dir / ALL_KEY_PATH  # ALL_KEY_PATH is now just "all_key.json" filename
+    self.handler = GatewayMessageHandler(str(self.key_path))
 ```
 
 - [ ] **Step 3: Commit**
@@ -252,17 +293,17 @@ git commit -m "feat(gateway): key path derived from --cwd-dir + ALL_KEY_PATH fil
 
 **Files:** Modify: `gateway/.env.example`
 
-- [ ] **Step 1: Update .env.example**
+- [ ] **Step 1: Replace .env.example content**
+
+The existing `ALL_KEY_PATH=./all_key.json` line is removed (no longer used). Replace with:
 
 ```bash
-# .env.example
 # Required: data directory (absolute path)
 CWD_DIR=/path/to/data
 
 GATEWAY_HOST=127.0.0.1
 GATEWAY_PORT=7899
-NOSTR_RELAYS=wss://relay.damus.io,...
-ALL_KEY_PATH=all_key.json
+NOSTR_RELAYS=wss://relay.damus.io,wss://relay.0xchat.com,wss://nostr.oxtr.dev,wss://relay.primal.net
 LOG_LEVEL=INFO
 ```
 
@@ -270,7 +311,7 @@ LOG_LEVEL=INFO
 
 ```bash
 git add gateway/.env.example
-git commit -m "docs(gateway): add CWD_DIR to .env.example"
+git commit -m "docs(gateway): replace ALL_KEY_PATH with CWD_DIR in .env.example"
 ```
 
 ---
