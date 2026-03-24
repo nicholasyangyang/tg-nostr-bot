@@ -114,12 +114,16 @@ async def register_webhook(client: httpx.AsyncClient, token: str, webhook_url: s
 
 @app.post("/webhook")
 async def webhook_handler(update: Update, state: AppState = Depends(get_state)):
+    logger.debug("[TG] webhook_handler called: update=%s", update)
     async def handle():
         msg = update.message
+        logger.debug("[TG] handle: msg=%s", msg)
         if not msg or not msg.text:
+            logger.debug("[TG] handle: no msg or no text, returning")
             return
         from_field = getattr(msg, 'from_field', None) or msg.get('from')
         if not from_field:
+            logger.debug("[TG] handle: no from_field, returning")
             return
         user_id = from_field.get("id")
         chat_id = msg.chat.get("id")
@@ -133,7 +137,11 @@ async def webhook_handler(update: Update, state: AppState = Depends(get_state)):
         state.user_chat_ids[user_id] = chat_id
 
         to_npub = MSG_TO
+        logger.debug("[TG] handle: user_id=%s chat_id=%s text=%s to_npub=%s _running=%s",
+                     user_id, chat_id, text[:50], to_npub[:20] if to_npub else "",
+                     state.ws_client._running if state.ws_client else None)
         if to_npub and state.ws_client and state.ws_client._running:
+            logger.debug("[TG] calling send_dm...")
             state.ws_client.send_dm(to_npub, text)
             logger.info(f"[TG] Sent to Nostr: {text[:50]}")
         else:

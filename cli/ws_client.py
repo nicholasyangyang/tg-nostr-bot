@@ -76,42 +76,58 @@ class WSClient:
         self._running = True
         reconnect_attempts = 0
         ping_task: Optional[asyncio.Task] = None
+        logger.debug("[WS] run() started, _running=%s", self._running)
 
         async def client_ping_loop():
             """Send keepalive pings to Gateway to prevent tunnel idle timeouts."""
+            ping_count = 0
             while self._running:
+                logger.debug("[WS] ping_loop iteration %d, sleeping 20s...", ping_count)
                 await asyncio.sleep(20)
                 if not self._running:
+                    logger.debug("[WS] ping_loop: _running=False, breaking")
                     break
                 if not self._ws:
+                    logger.debug("[WS] ping_loop: _ws=None, breaking")
                     break
                 try:
                     await self._ws.send(json.dumps({"type": "ping"}))
-                    logger.debug("[WS] Ping sent")
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("[WS] Ping: connection closed, exiting ping loop")
+                    ping_count += 1
+                    logger.debug("[WS] Ping #%d sent", ping_count)
+                except websockets.exceptions.ConnectionClosed as e:
+                    logger.warning("[WS] Ping: connection closed, exiting ping loop: %s", e)
                     break
                 except Exception as e:
                     logger.warning("[WS] Ping failed: %s, exiting ping loop", e)
                     break
+            logger.debug("[WS] ping_loop exited, ping_count=%d", ping_count)
 
         try:
             ping_task = asyncio.create_task(client_ping_loop())
+            logger.debug("[WS] ping_task created: %s", ping_task)
             while self._running:
                 try:
+                    logger.debug("[WS] Waiting for message on _ws=%s...", id(self._ws))
                     async for raw in self._ws:
                         msg = json.loads(raw)
                         msg_type = msg.get("type", "")
+                        logger.debug("[WS] Received msg type=%s, raw[:100]=%s", msg_type, raw[:100])
 
                         if msg_type == "pong":
+                            logger.debug("[WS] Got pong")
                             continue
                         elif msg_type == "ping":
+                            logger.debug("[WS] Got ping, replying")
                             await self._ws.send(json.dumps({"type": "pong"}))
                         elif msg_type == "dm":
+                            logger.info("[WS] Got dm from=%s content=%s", msg.get("from_npub", "")[:20], msg.get("content", "")[:50])
                             if self.on_message:
                                 asyncio.create_task(self._safe_callback(msg))
                         elif msg_type == "dm_received":
+                            logger.debug("[WS] Got dm_received")
                             pass
+                        else:
+                            logger.warning("[WS] Unknown msg type: %s", msg_type)
                 except websockets.exceptions.ConnectionClosed as e:
                     reconnect_attempts += 1
                     if reconnect_attempts >= 3:
@@ -189,7 +205,10 @@ class WSClient:
 
     def send_dm(self, to_npub: str, content: str):
         """Fire-and-forget send DM. Must be called from async context."""
+        logger.debug("[WS] send_dm called: to=%s content=%s _ws=%s _running=%s _npub=%s",
+                     to_npub[:20], content[:50], self._ws is not None, self._running, self._npub[:20])
         if not self._ws or not self._running:
+            logger.warning("[WS] send_dm: _ws=%s or _running=%s — skipping", self._ws, self._running)
             return
         if not self._npub:
             logger.warning("[WS] send_dm: not registered yet")
@@ -201,8 +220,9 @@ class WSClient:
                 "to_npub": to_npub,
                 "content": content,
             })))
+            logger.info("[WS] DM task created")
         except Exception as e:
-            logger.error(f"[WS] send_dm failed: {e}")
+            logger.error("[WS] send_dm failed: %s", e)
 
     async def disconnect(self):
         self._running = False
