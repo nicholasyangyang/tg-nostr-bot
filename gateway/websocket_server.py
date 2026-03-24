@@ -68,6 +68,7 @@ class GatewayMessageHandler:
     def _save_all_keys(self):
         """Save all_key.json to disk atomically: write to tmp then rename."""
         import os, tempfile
+        tmp_path = None
         try:
             path = Path(self._key_path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +79,9 @@ class GatewayMessageHandler:
             logger.info(f"[Gateway] Saved {len(self._all_keys)} keys to {self._key_path}")
         except Exception as e:
             logger.error(f"[Gateway] Failed to save {self._key_path}: {e}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
     def set_relay_client(self, relay_client: RelayClient, loop: asyncio.AbstractEventLoop):
         self._relay_client = relay_client
