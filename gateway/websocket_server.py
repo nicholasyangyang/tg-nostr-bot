@@ -71,6 +71,11 @@ class GatewayMessageHandler:
             except Exception as e:
                 logger.warning(f"[Gateway] Failed to load {self._key_path}: {e}")
                 self._all_keys = {}
+        else:
+            # File doesn't exist — create empty file atomically
+            logger.info(f"[Gateway] No {self._key_path} found, creating empty")
+            self._all_keys = {}
+            self._save_all_keys()
 
     def _save_all_keys(self):
         """Save all_key.json to disk atomically: write to tmp then rename."""
@@ -166,6 +171,8 @@ class GatewayMessageHandler:
 
         logger.info(f"[Gateway] register_request: generated npub={npub[:20]}...")
         return {"type": "register_done", "npub": npub, "nsec": nsec}
+        # NOTE: do NOT subscribe here — _handle_register subscribes when it
+        # receives the `register` follow-up, avoiding duplicate subscriptions.
 
     def _handle_register(self, msg: dict) -> dict:
         """Register CLI's existing npub (with optional seckey for receiving DMs)."""
@@ -189,9 +196,8 @@ class GatewayMessageHandler:
 
         logger.info(f"[Gateway] Registered npub={npub[:20]}..., seckey={'present' if seckey else 'missing'}")
 
-        # Subscribe relay for this npub
-        if self._relay_client and self._loop:
-            self._loop.create_task(self._relay_client.subscribe([npub_hex]))
+        # NOTE: do NOT subscribe here — auto-registration in _handle_client
+        # calls subscribe for the `register` message, avoiding duplicate subs.
 
         return {"type": "registered", "npub": npub}
 
@@ -245,6 +251,8 @@ class WebSocketServer:
         host: str = GATEWAY_HOST,
         port: int = GATEWAY_PORT,
     ):
+        self.host = host
+        self.port = port
         self.cwd_dir = cwd_dir
         self.key_path = cwd_dir / ALL_KEY_PATH
         self.handler = GatewayMessageHandler(str(self.key_path))
@@ -411,6 +419,11 @@ class WebSocketServer:
                     seckey = msg.get("seckey", "")
                     if npub:
                         self.handler.register_npub(client_id, npub, seckey)
+                        # Subscribe relay for this npub
+                        if self._relay_client:
+                            asyncio.create_task(
+                                self._relay_client.subscribe([npub_to_hex(npub)])
+                            )
 
                 await websocket.send(json.dumps(response))
 
