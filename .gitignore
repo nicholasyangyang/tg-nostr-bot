@@ -10,3 +10,4 @@ code_env/
 *.env
 all_key.json
 key.json
+.worktrees/
