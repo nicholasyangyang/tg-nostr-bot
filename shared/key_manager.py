@@ -226,7 +226,7 @@ def npub_to_hex(npub: str) -> str:
 
     Accepts:
     - Raw 64-char hex string (already hex) → returned as-is
-    - bech32 npub1... → decoded, padding stripped
+    - bech32 npub1... → decoded to 32-byte x-only pubkey
     """
     import bech32
     if not npub or not npub.startswith("npub1"):
