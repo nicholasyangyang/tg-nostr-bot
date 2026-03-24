@@ -61,6 +61,13 @@ class GatewayMessageHandler:
                 with open(path, "r") as f:
                     self._all_keys = json.load(f)
                 logger.info(f"[Gateway] Loaded {len(self._all_keys)} keys from {self._key_path}")
+                # Also populate _npub_to_seckey so gateway can unwrap DMs for any key
+                for npub_hex, val in self._all_keys.items():
+                    nsec_raw = val.get("nsec", "")
+                    if nsec_raw:
+                        seckey_hex = nsec_raw if len(nsec_raw) == 64 else nsec_to_hex(nsec_raw)
+                        self._npub_to_seckey[npub_hex] = seckey_hex
+                logger.info(f"[Gateway] Loaded {len(self._npub_to_seckey)} seckeys for DM unwrap")
             except Exception as e:
                 logger.warning(f"[Gateway] Failed to load {self._key_path}: {e}")
                 self._all_keys = {}
