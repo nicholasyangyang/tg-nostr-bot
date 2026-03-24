@@ -5,6 +5,8 @@ import logging
 import websockets
 from pathlib import Path
 
+from typing import Optional
+
 from cli.config import KEY_PATH, GATEWAY_WS_URL
 
 logger = logging.getLogger("cli")
@@ -73,79 +75,90 @@ class WSClient:
         """Listen for messages from Gateway, auto-reconnect on disconnect."""
         self._running = True
         reconnect_attempts = 0
+        ping_task: Optional[asyncio.Task] = None
 
         async def client_ping_loop():
             """Send keepalive pings to Gateway to prevent tunnel idle timeouts."""
             while self._running:
                 await asyncio.sleep(20)
-                if not self._running or not self._ws:
+                if not self._running:
+                    break
+                ws = self._ws
+                if not ws:
                     break
                 try:
-                    await self._ws.send(json.dumps({"type": "ping"}))
+                    await ws.send(json.dumps({"type": "ping"}))
                 except Exception:
                     break
 
-        ping_task = asyncio.create_task(client_ping_loop())
-
-        while self._running:
-            try:
-                async for raw in self._ws:
-                    msg = json.loads(raw)
-                    msg_type = msg.get("type", "")
-
-                    if msg_type == "pong":
-                        continue
-                    elif msg_type == "ping":
-                        await self._ws.send(json.dumps({"type": "pong"}))
-                    elif msg_type == "dm":
-                        if self.on_message:
-                            asyncio.create_task(self._safe_callback(msg))
-                    elif msg_type == "dm_received":
-                        pass
-            except websockets.exceptions.ConnectionClosed as e:
-                reconnect_attempts += 1
-                if reconnect_attempts >= 3:
-                    logger.error(f"[WS] Connection closed after {reconnect_attempts} attempts, exiting")
-                    self._running = False
-                    break
-                delay = 5 * reconnect_attempts
-                logger.warning(f"[WS] Connection closed: {e}, reconnecting in {delay}s (attempt {reconnect_attempts}/3)...")
-                await asyncio.sleep(delay)
-                if not self._running:
-                    break
-                # Try to reconnect
+        try:
+            ping_task = asyncio.create_task(client_ping_loop())
+            while self._running:
                 try:
-                    self._ws = await websockets.connect(self.gateway_url)
-                    # Re-register using stored npub
-                    if self._npub:
-                        await self._ws.send(json.dumps({"type": "register", "npub": self._npub}))
-                        resp = json.loads(await self._ws.recv())
-                        if resp.get("type") == "registered":
-                            reconnect_attempts = 0
-                            logger.info("[WS] Reconnected and registered")
-                        else:
-                            logger.warning("[WS] Reconnect register unexpected response")
-                    else:
-                        logger.warning("[WS] No npub for reconnection, requesting new key")
-                        await self._ws.send(json.dumps({"type": "register_request"}))
-                        resp = json.loads(await self._ws.recv())
-                        if resp.get("type") == "register_done":
-                            self._npub = resp["npub"]
-                            nsec = resp["nsec"]
-                            Path(KEY_PATH).parent.mkdir(parents=True, exist_ok=True)
-                            with open(KEY_PATH, "w") as f:
-                                json.dump({"npub": self._npub, "nsec": nsec}, f)
+                    async for raw in self._ws:
+                        msg = json.loads(raw)
+                        msg_type = msg.get("type", "")
+
+                        if msg_type == "pong":
+                            continue
+                        elif msg_type == "ping":
+                            await self._ws.send(json.dumps({"type": "pong"}))
+                        elif msg_type == "dm":
+                            if self.on_message:
+                                asyncio.create_task(self._safe_callback(msg))
+                        elif msg_type == "dm_received":
+                            pass
+                except websockets.exceptions.ConnectionClosed as e:
+                    reconnect_attempts += 1
+                    if reconnect_attempts >= 3:
+                        logger.error(f"[WS] Connection closed after {reconnect_attempts} attempts, exiting")
+                        self._running = False
+                        break
+                    delay = 5 * reconnect_attempts
+                    logger.warning(f"[WS] Connection closed: {e}, reconnecting in {delay}s (attempt {reconnect_attempts}/3)...")
+                    await asyncio.sleep(delay)
+                    if not self._running:
+                        break
+                    # Try to reconnect
+                    try:
+                        self._ws = await websockets.connect(self.gateway_url)
+                        # Re-register using stored npub
+                        if self._npub:
                             await self._ws.send(json.dumps({"type": "register", "npub": self._npub}))
                             resp = json.loads(await self._ws.recv())
-                            logger.info("[WS] Reconnected with new key")
+                            if resp.get("type") == "registered":
+                                reconnect_attempts = 0
+                                logger.info("[WS] Reconnected and registered")
+                            else:
+                                logger.warning("[WS] Reconnect register unexpected response")
                         else:
-                            logger.warning("[WS] Reconnect register_request unexpected response")
-                except Exception as e2:
-                    logger.error(f"[WS] Reconnect failed: {e2}, retrying in 10s...")
-                    await asyncio.sleep(10)
-            except Exception as e:
-                logger.error(f"[WS] Unexpected error: {e}")
-                await asyncio.sleep(5)
+                            logger.warning("[WS] No npub for reconnection, requesting new key")
+                            await self._ws.send(json.dumps({"type": "register_request"}))
+                            resp = json.loads(await self._ws.recv())
+                            if resp.get("type") == "register_done":
+                                self._npub = resp["npub"]
+                                nsec = resp["nsec"]
+                                Path(KEY_PATH).parent.mkdir(parents=True, exist_ok=True)
+                                with open(KEY_PATH, "w") as f:
+                                    json.dump({"npub": self._npub, "nsec": nsec}, f)
+                                await self._ws.send(json.dumps({"type": "register", "npub": self._npub}))
+                                resp = json.loads(await self._ws.recv())
+                                logger.info("[WS] Reconnected with new key")
+                            else:
+                                logger.warning("[WS] Reconnect register_request unexpected response")
+                    except Exception as e2:
+                        logger.error(f"[WS] Reconnect failed: {e2}, retrying in 10s...")
+                        await asyncio.sleep(10)
+                except Exception as e:
+                    logger.error(f"[WS] Unexpected error: {e}")
+                    await asyncio.sleep(5)
+        finally:
+            if ping_task:
+                ping_task.cancel()
+                try:
+                    await ping_task
+                except asyncio.CancelledError:
+                    pass
 
     async def _safe_callback(self, msg: dict):
         try:
