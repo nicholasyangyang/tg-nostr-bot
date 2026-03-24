@@ -70,9 +70,8 @@ async def lifespan(app: FastAPI):
             return
         if _state.user_chat_ids:
             chat_id = next(iter(_state.user_chat_ids.values()))
-            from_npub = msg.get("from_npub", "")
             content = msg.get("content", "")
-            await _state.send_message(chat_id, f"[{from_npub[:16]}...]: {content}")
+            await _state.send_message(chat_id, content)
 
     ws = WSClient(GATEWAY_WS_URL, on_message=on_dm, key_path=str(_state.cwd_dir / KEY_PATH))
     if await ws.connect_and_register():
