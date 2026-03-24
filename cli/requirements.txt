@@ -1,0 +1,10 @@
+aiohttp
+websockets
+fastapi
+uvicorn
+httpx
+python-dotenv
+pydantic
+secp256k1
+bech32
+cryptography

@@ -1,0 +1,6 @@
+aiohttp
+websockets
+python-dotenv
+secp256k1
+bech32
+cryptography
