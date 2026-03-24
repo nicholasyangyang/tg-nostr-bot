@@ -292,7 +292,7 @@ class WebSocketServer:
                 "content": plaintext,
             })
         else:
-            logger.info(f"[Gateway] No client connected for recipient {recipient_npub[:20]}...")
+            logger.warning(f"[Gateway] No client connected for recipient {recipient_npub[:20]}...")
 
     async def start(self):
         """Start the WebSocket server and relay connections."""

@@ -1,7 +1,6 @@
 """CLI FastAPI Webhook server: receives Telegram updates."""
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -16,7 +15,7 @@ from typing import Optional
 
 import httpx
 
-from cli.config import BOT_TOKEN, WEBHOOK_URL, ALLOWED_USERS, PORT, GATEWAY_WS_URL, LOG_LEVEL
+from cli.config import BOT_TOKEN, WEBHOOK_URL, ALLOWED_USERS, PORT, GATEWAY_WS_URL, MSG_TO, LOG_LEVEL
 from cli.ws_client import WSClient
 
 logger = logging.getLogger("cli")
@@ -84,6 +83,9 @@ async def lifespan(app: FastAPI):
     if BOT_TOKEN and WEBHOOK_URL:
         await register_webhook(_state.http_client, BOT_TOKEN, WEBHOOK_URL)
 
+    if BOT_TOKEN and not ALLOWED_USERS:
+        logger.warning("[CLI] BOT_TOKEN is configured but ALLOWED_USERS is empty — all users will be blocked")
+
     yield
 
     if _state:
@@ -126,7 +128,7 @@ async def webhook_handler(update: Update, state: AppState = Depends(get_state)):
 
         state.user_chat_ids[user_id] = chat_id
 
-        to_npub = os.getenv("MSG_TO", "")
+        to_npub = MSG_TO
         if to_npub and state.ws_client and state.ws_client._running:
             state.ws_client.send_dm(to_npub, text)
             logger.info(f"[TG] Sent to Nostr: {text[:50]}")

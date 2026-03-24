@@ -15,25 +15,46 @@ from cryptography.hazmat.backends import default_backend
 # ---- NIP-44 encryption helpers ----
 
 def _ecdh_derive_shared_key(seckey_hex: str, pubkey_xonly_hex: str) -> bytes:
-    """ECDH shared secret using secp256k1 library (handles x-only pubkeys natively).
+    """ECDH shared secret using secp256k1 for point math, cryptography for ECDH.
 
     seckey_hex: 32-byte hex string (or nsec bech32)
     pubkey_xonly_hex: 32-byte hex x-only pubkey
-    Returns 32-byte ECDH shared secret.
+    Returns 32-byte raw ECDH shared secret (the x-coordinate).
     """
+    from cryptography.hazmat.primitives.asymmetric.ec import (
+        SECP256K1, ECDH,
+        EllipticCurvePublicNumbers, EllipticCurvePrivateNumbers,
+    )
     import secp256k1
 
     if seckey_hex.startswith("nsec1"):
         seckey_hex = nsec_to_hex(seckey_hex)
-    if len(seckey_hex) == 64:
-        pk = secp256k1.PrivateKey(bytes.fromhex(seckey_hex))
-    else:
-        pk = secp256k1.PrivateKey()
+    priv_bytes = bytes.fromhex(seckey_hex)
+    pub_bytes = bytes.fromhex(pubkey_xonly_hex)
 
-    # ecdh_raw_derive takes x-only (32 bytes) pubkey directly
-    pubkey_bytes = bytes.fromhex(pubkey_xonly_hex)
-    shared = pk.ecdh_raw_derive(pubkey_bytes)
-    return shared
+    # Use secp256k1 to derive sender's full public key point from private key
+    sender_priv = secp256k1.PrivateKey(priv_bytes)
+    sender_pubkey_full = sender_priv.pubkey.serialize(compressed=False)  # 65 bytes
+    x_s = int.from_bytes(sender_pubkey_full[1:33], "big")
+    y_s = int.from_bytes(sender_pubkey_full[33:65], "big")
+
+    # Derive recipient's y from x (x-only pubkey)
+    p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+    x_r = int.from_bytes(pub_bytes, "big")
+    y_sq = (pow(x_r, 3, p) + 7) % p
+    y_r = pow(y_sq, (p + 1) // 4, p)
+    # Verify y is on curve; if not, flip to the other root
+    if pow(y_r, 2, p) != y_sq:
+        y_r = p - y_r
+
+    # Build private key with its public key for ECDH exchange
+    sender_pub_nums = EllipticCurvePublicNumbers(x_s, y_s, SECP256K1())
+    priv_nums = EllipticCurvePrivateNumbers(
+        int.from_bytes(priv_bytes, "big"), sender_pub_nums,
+    )
+    sender_key = priv_nums.private_key()
+    recipient_pub = EllipticCurvePublicNumbers(x_r, y_r, SECP256K1()).public_key()
+    return sender_key.exchange(ECDH(), recipient_pub)
 
 
 def _nip44_shared_secret(seckey: str, pubkey: str) -> bytes:
@@ -182,7 +203,8 @@ def generate_keys() -> dict:
 
     pk = secp256k1.PrivateKey()
     privkey_hex = pk.serialize()
-    pubkey_bytes = pk.pubkey.serialize()
+    # Encode x-only pubkey (no prefix byte) so npub_to_hex / hex_to_npub are inverses
+    pubkey_bytes = pk.pubkey.serialize()[1:]  # strip 0x02/0x03 prefix → x-only
 
     witdata = bech32.convertbits(pubkey_bytes, 8, 5)
     npub = bech32.bech32_encode("npub", witdata)
@@ -204,7 +226,7 @@ def npub_to_hex(npub: str) -> str:
 
     Accepts:
     - Raw 64-char hex string (already hex) → returned as-is
-    - bech32 npub1... → decoded, parity stripped
+    - bech32 npub1... → decoded to 32-byte x-only pubkey
     """
     import bech32
     if not npub or not npub.startswith("npub1"):
@@ -213,11 +235,11 @@ def npub_to_hex(npub: str) -> str:
         hrp, data = bech32.bech32_decode(npub)
         if data is None:
             return npub
-        decoded = bech32.convertbits(data, 5, 8, False)
-        # bech32 decodes to 33 bytes due to padding: first byte is padding, strip it
-        if len(decoded) == 33:
-            decoded = decoded[1:]
-        return bytes(decoded).hex()  # 32-byte x-only
+        decoded = bech32.convertbits(data, 5, 8, True)
+        if decoded is None:
+            return npub
+        # Take exactly 32 bytes (64 hex chars) — the x-only pubkey
+        return bytes(decoded).hex()[:64]
     except Exception:
         return npub
 
@@ -231,8 +253,10 @@ def nsec_to_hex(nsec: str) -> str:
         hrp, data = bech32.bech32_decode(nsec)
         if data is None:
             return nsec
-        decoded = bech32.convertbits(data, 5, 8, False)
-        return bytes(decoded).hex()
+        decoded = bech32.convertbits(data, 5, 8, True)
+        if decoded is None:
+            return nsec
+        return bytes(decoded).hex()[:64]
     except Exception:
         return nsec
 
@@ -250,6 +274,7 @@ def hex_to_npub(hex_pubkey: str) -> str:
         # If 33 bytes (parity || x), strip parity byte to get x-only
         if len(pubkey_bytes) == 33:
             pubkey_bytes = pubkey_bytes[1:]
+        # 32 bytes -> convertbits -> bech32
         witdata = bech32.convertbits(pubkey_bytes, 8, 5)
         return bech32.bech32_encode("npub", witdata)
     except Exception:

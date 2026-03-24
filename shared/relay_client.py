@@ -182,9 +182,28 @@ class RelayClient:
             await conn.subscribe(self._all_subscribed_npub)
 
     async def listen(self):
-        """Listen for events from all relays."""
-        tasks = [conn.listen() for conn in self._connections]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        """Listen for events from all relays, auto-reconnect on disconnect."""
+        while self._running:
+            # Reconnect dead connections
+            for conn in self._connections:
+                if not conn._running and conn.ws is None:
+                    logger.info(f"[Relay] Attempting to reconnect to {conn.relay_url}")
+                    if await conn.connect():
+                        await conn.subscribe(self._all_subscribed_npub)
+                    else:
+                        logger.warning(f"[Relay] Reconnect failed to {conn.relay_url}, will retry")
+
+            # Run listeners for active connections
+            tasks = [conn.listen() for conn in self._connections if conn._running]
+            if not tasks:
+                logger.warning("[Relay] No active connections, waiting to reconnect...")
+                await asyncio.sleep(10)
+                continue
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"[Relay] Listener error on {self._connections[i].relay_url}: {result}")
 
     def _on_event(self, event: dict):
         """Handle received event (called from relay connection)."""

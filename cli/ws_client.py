@@ -72,6 +72,7 @@ class WSClient:
     async def run(self):
         """Listen for messages from Gateway, auto-reconnect on disconnect."""
         self._running = True
+        reconnect_attempts = 0
         while self._running:
             try:
                 async for raw in self._ws:
@@ -88,8 +89,14 @@ class WSClient:
                     elif msg_type == "dm_received":
                         pass
             except websockets.exceptions.ConnectionClosed as e:
-                logger.warning(f"[WS] Connection closed: {e}, reconnecting in 5s...")
-                await asyncio.sleep(5)
+                reconnect_attempts += 1
+                if reconnect_attempts >= 3:
+                    logger.error(f"[WS] Connection closed after {reconnect_attempts} attempts, exiting")
+                    self._running = False
+                    break
+                delay = 5 * reconnect_attempts
+                logger.warning(f"[WS] Connection closed: {e}, reconnecting in {delay}s (attempt {reconnect_attempts}/3)...")
+                await asyncio.sleep(delay)
                 if not self._running:
                     break
                 # Try to reconnect
@@ -100,6 +107,7 @@ class WSClient:
                         await self._ws.send(json.dumps({"type": "register", "npub": self._npub}))
                         resp = json.loads(await self._ws.recv())
                         if resp.get("type") == "registered":
+                            reconnect_attempts = 0
                             logger.info("[WS] Reconnected and registered")
                         else:
                             logger.warning("[WS] Reconnect register unexpected response")
