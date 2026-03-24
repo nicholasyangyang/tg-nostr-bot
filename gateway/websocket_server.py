@@ -355,31 +355,30 @@ class WebSocketServer:
                 msg = json.loads(raw)
                 msg_type = msg.get("type", "")
 
-                # Check pong timeout BEFORE processing pong to avoid race condition.
-                # If the timeout has already expired during the recv() call,
-                # close immediately rather than processing a stale pong.
-                if time.time() - last_ping > 10:
-                    logger.warning(f"[Gateway] Client {client_id} pong timeout")
-                    break
-
+                # Update last_ping FIRST when receiving pong, then check timeout.
+                # This prevents a late pong (arrived after ping timeout window)
+                # from incorrectly triggering disconnection.
                 if msg_type == "pong":
                     last_ping = time.time()
                     continue
 
+                # Check pong timeout AFTER pong processing.
+                # Only fires if no message (including pong) was received for >10s.
+                if time.time() - last_ping > 10:
+                    logger.warning(f"[Gateway] Client {client_id} pong timeout")
+                    break
+
                 # Handle client messages
                 response = self.handler.handle_message(msg)
 
-                # Auto-register npub after register_request or register
+                # Auto-register npub after register_request or register.
+                # NOTE: do NOT subscribe here for register_request — _handle_register
+                # subscribes when it receives the `register` follow-up, avoiding dup.
                 if msg_type == "register_request":
                     npub = response.get("npub", "")
                     nsec = response.get("nsec", "")
                     if npub:
                         self.handler.register_npub(client_id, npub, nsec)
-                        # Subscribe relay for this new npub
-                        if self._relay_client and self._running:
-                            loop = asyncio.get_running_loop()
-                            npub_hex = npub_to_hex(npub)
-                            await self._relay_client.subscribe([npub_hex])
                 elif msg_type == "register":
                     npub = msg.get("npub", "")
                     seckey = msg.get("seckey", "")
