@@ -46,6 +46,8 @@ tg-nostr-bot/
 └── shared/                   # 共享模块（来自 py_gateway）
     ├── key_manager.py        # NIP-44 / NIP-17 加解密
     └── relay_client.py       # Nostr 中继连接池
+└── tests/                    # 单元测试
+    └── test_key_manager.py   # NIP-44 / NIP-17 / 密钥转换测试
 ```
 
 ## 快速开始
@@ -169,7 +171,7 @@ Relay (kind:1059) --> Gateway (NIP-17 解密) --> WS --> CLI --> Telegram Bot AP
 {"type": "register_done", "npub": "npub1...", "nsec": "nsec1..."}
 
 // 收到 DM
-{"type": "dm", "from_npub": "npub1...", "content": "hello"}
+{"type": "dm", "from_npub": "npub1...", "to_npub": "npub1...", "content": "hello"}
 ```
 
 ## 多实例支持
@@ -186,6 +188,14 @@ Relay (kind:1059) --> Gateway (NIP-17 解密) --> WS --> CLI --> Telegram Bot AP
 - **Gateway 持有所有私钥**：CLI 不进行任何加密操作，所有 NIP-17 加解密由 Gateway 完成。
 - **ALLOWED_USERS**：CLI 通过 Telegram User ID 白名单控制访问权限。
 - `.gitignore` 已忽略 `*.env`、`all_key.json`、`key.json`，确保密钥不泄露。
+- **Gateway WS 通信**：Gateway 与 CLI 之间通过 WebSocket 通信，**必须部署在可信网络**（localhost 或私有 LAN）。`register` 接口不验证 npub 所有权，同一网络内的恶意进程可冒充任意 npub。
+- **部署要求**：Gateway 和 CLI 应部署在同一台机器或私有网络中，不要暴露到公网。
+
+## 可靠性
+
+- **中继断线重连**：Relay 连接断开后自动重试，采用指数退避（10s → 最大 5min）。
+- **CLI WebSocket 重连**：Gateway 连接断开后重试 3 次，每次退避 5s/10s/15s，3 次后 CLI 退出。
+- **密钥持久化**：`all_key.json` 使用原子写入（先写临时文件再 rename），确保密钥不损坏。
 
 ## 依赖
 
