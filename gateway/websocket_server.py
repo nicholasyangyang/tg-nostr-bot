@@ -241,14 +241,13 @@ class WebSocketServer:
 
     def __init__(
         self,
+        cwd_dir: Path,
         host: str = GATEWAY_HOST,
         port: int = GATEWAY_PORT,
-        key_path: str = ALL_KEY_PATH,
     ):
-        self.host = host
-        self.port = port
-        self.key_path = key_path
-        self.handler = GatewayMessageHandler(key_path)
+        self.cwd_dir = cwd_dir
+        self.key_path = cwd_dir / ALL_KEY_PATH
+        self.handler = GatewayMessageHandler(str(self.key_path))
         self._relay_client = RelayClient(NOSTR_RELAYS)
         # Wire up relay event callback
         self._relay_client._on_event = self._on_relay_event
