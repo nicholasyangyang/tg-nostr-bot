@@ -253,6 +253,8 @@ class WebSocketServer:
         # Wire up relay event callback
         self._relay_client._on_event = self._on_relay_event
         self._running = False
+        # Event deduplication: event_id → timestamp
+        self._seen: dict = {}
 
     def _on_relay_event(self, event: dict):
         """Handle incoming kind:1059 event from relay: unwrap NIP-17 and route to CLI."""
@@ -263,6 +265,22 @@ class WebSocketServer:
         kind = event.get("kind")
         if kind != KIND_NIP17_GIFT_WRAP:
             return
+
+        # Deduplicate: same event from multiple relays
+        eid = event.get("id", "")
+        if not eid:
+            return
+        now = time.time()
+        if eid in self._seen:
+            logger.debug(f"[Gateway] Duplicate event {eid[:16]}... ignored")
+            return
+        self._seen[eid] = now
+        # Prune entries older than 2 hours
+        if len(self._seen) > 5000:
+            cutoff = now - 7200
+            for k in list(self._seen):
+                if self._seen[k] < cutoff:
+                    del self._seen[k]
 
         logger.info(f"[Gateway] Received kind:{kind} event from relay")
 
