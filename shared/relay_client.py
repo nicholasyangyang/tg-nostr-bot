@@ -156,7 +156,7 @@ class RelayClient:
         self._connections: List[RelayConnection] = []
         self._running = False
         self._t0 = int(time.time()) - 7 * 86400  # 7 days back, limit=0 (NIP-16 reactive)  # Subscription start time
-        self._all_subscribed_npub: List[str] = []
+        self._all_subscribed_npub: Set[str] = set()
 
     async def connect(self) -> bool:
         """Connect to all relays."""
@@ -175,14 +175,13 @@ class RelayClient:
         Deduplicates globally across all connections — calling subscribe([A])
         then subscribe([B]) merges to a single subscription with both npubs.
         """
-        for pk in pubkeys:
-            if pk not in self._all_subscribed_npub:
-                self._all_subscribed_npub.append(pk)
+        self._all_subscribed_npub.update(pubkeys)
         for conn in self._connections:
             await conn.subscribe(self._all_subscribed_npub)
 
     async def listen(self):
         """Listen for events from all relays, auto-reconnect on disconnect."""
+        backoff = 10  # seconds, doubles up to 300s (5 min)
         while self._running:
             # Reconnect dead connections
             for conn in self._connections:
@@ -190,15 +189,20 @@ class RelayClient:
                     logger.info(f"[Relay] Attempting to reconnect to {conn.relay_url}")
                     if await conn.connect():
                         await conn.subscribe(self._all_subscribed_npub)
+                        backoff = 10  # reset on success
                     else:
                         logger.warning(f"[Relay] Reconnect failed to {conn.relay_url}, will retry")
 
             # Run listeners for active connections
             tasks = [conn.listen() for conn in self._connections if conn._running]
             if not tasks:
-                logger.warning("[Relay] No active connections, waiting to reconnect...")
-                await asyncio.sleep(10)
+                logger.warning(f"[Relay] No active connections, waiting {backoff}s to reconnect...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
                 continue
+
+            # Reset backoff on successful active connections
+            backoff = 10
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for i, result in enumerate(results):
@@ -310,8 +314,7 @@ class RelayClient:
 
         # If no sender key provided, use gateway's own key
         if not sender_seckey_hex:
-            logger.warning("[Relay] No sender key provided and KEY_PATH not configured for shared relay_client — cannot publish DM")
-            return
+            raise ValueError("[Relay] No sender key provided — cannot publish DM")
 
         # Create gift-wrapped event
         gift_wrap = nip17_wrap_message(

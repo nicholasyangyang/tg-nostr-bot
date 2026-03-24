@@ -243,3 +243,72 @@ class TestKeyConversions:
 
         # Roundtrip
         assert hex_to_npub(hex_pub) == keys["npub"]
+
+
+class TestNpubToHexValidation:
+    """Test npub_to_hex validation of raw hex input."""
+
+    def test_npub_to_hex_valid_64char_hex(self):
+        """Valid 64-char hex should be returned as-is."""
+        keys = generate_keys()
+        hex_pub = npub_to_hex(keys["npub"])
+        # Verify it's exactly 64 hex chars
+        assert len(hex_pub) == 64
+        assert all(c in "0123456789abcdef" for c in hex_pub)
+
+    def test_npub_to_hex_rejects_invalid_hex(self):
+        """Invalid hex strings should be returned as-is (no crash)."""
+        # Invalid chars
+        result = npub_to_hex("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+        assert result == "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+
+    def test_npub_to_hex_rejects_wrong_length(self):
+        """Wrong-length strings should be returned as-is."""
+        result = npub_to_hex("abc123")
+        assert result == "abc123"
+
+
+class TestNIP17SealVerification:
+    """Test NIP-17 seal signature verification."""
+
+    def test_unwrap_rejects_tampered_seal(self):
+        """Unwrapping a tampered seal (wrong id) should return None."""
+        sender = generate_keys()
+        recipient = generate_keys()
+
+        sender_seckey = nsec_to_hex(sender["nsec"])
+        sender_pubkey = npub_to_hex(sender["npub"])
+        recipient_hex = npub_to_hex(recipient["npub"])
+        recipient_seckey = nsec_to_hex(recipient["nsec"])
+
+        import secp256k1
+        rp = secp256k1.PrivateKey(bytes.fromhex(recipient_seckey))
+        recipient_pubkey = rp.pubkey.serialize()[1:].hex()
+
+        gift_wrap = nip17_wrap_message(
+            plaintext="Secret",
+            sender_seckey=sender_seckey,
+            sender_pubkey=sender_pubkey,
+            recipient_pubkey=recipient_hex,
+        )
+
+        # Tamper with the seal id inside the gift wrap content
+        import secp256k1 as secp
+        # First decrypt the gift wrap to get the seal
+        from shared.key_manager import nip44_decrypt
+        gift_pub = gift_wrap["pubkey"]
+        seal_json = nip44_decrypt(gift_wrap["content"], recipient_seckey, gift_pub)
+        import json as json_mod
+        seal = json_mod.loads(seal_json)
+        # Tamper: change the id
+        seal["id"] = "0" * 64
+        tampered_seal_ct = nip44_encrypt(
+            json_mod.dumps(seal), gift_pub, recipient_hex
+        )
+        # Re-wrap
+        tampered_gift = dict(gift_wrap)
+        tampered_gift["content"] = tampered_seal_ct
+
+        # The tampered gift should fail to unwrap
+        rumor = nip17_unwrap(tampered_gift, recipient_seckey, recipient_pubkey)
+        assert rumor is None

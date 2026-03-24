@@ -105,8 +105,12 @@ async def register_webhook(client: httpx.AsyncClient, token: str, webhook_url: s
             logger.info(f"[CLI] Webhook registered: {webhook_url}/webhook")
         else:
             logger.warning(f"[CLI] Webhook registration failed: {body}")
+            raise RuntimeError(f"Webhook registration failed: {body}")
+    except RuntimeError:
+        raise
     except Exception as e:
         logger.warning(f"[CLI] Webhook registration error: {e}")
+        raise RuntimeError(f"Webhook registration error: {e}") from e
 
 @app.post("/webhook")
 async def webhook_handler(update: Update, state: AppState = Depends(get_state)):
@@ -114,7 +118,7 @@ async def webhook_handler(update: Update, state: AppState = Depends(get_state)):
         msg = update.message
         if not msg or not msg.text:
             return
-        from_field = msg.from_field
+        from_field = getattr(msg, 'from_field', None) or msg.get('from')
         if not from_field:
             return
         user_id = from_field.get("id")
@@ -135,5 +139,8 @@ async def webhook_handler(update: Update, state: AppState = Depends(get_state)):
         else:
             logger.warning(f"[TG] No MSG_TO or WS not connected")
 
-    asyncio.create_task(handle())
+    task = asyncio.create_task(handle())
+    task.add_done_callback(
+        lambda t: logger.error(f"[TG] handle() failed: {t.exception()}") if t.done() and t.exception() else None
+    )
     return {"ok": True}

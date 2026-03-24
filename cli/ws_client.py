@@ -160,4 +160,6 @@ class WSClient:
     async def disconnect(self):
         self._running = False
         if self._ws:
-            await self._ws.close()
+            ws = self._ws
+            self._ws = None
+            await ws.close()

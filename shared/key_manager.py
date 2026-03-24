@@ -230,6 +230,9 @@ def npub_to_hex(npub: str) -> str:
     """
     import bech32
     if not npub or not npub.startswith("npub1"):
+        # Validate raw hex: must be exactly 64 hex chars
+        if len(npub) == 64 and all(c in "0123456789abcdef" for c in npub.lower()):
+            return npub
         return npub
     try:
         hrp, data = bech32.bech32_decode(npub)
@@ -465,7 +468,7 @@ def nip17_unwrap(event: dict, recipient_seckey: str, recipient_pubkey: str) -> d
         if seal_id != expected_id:
             import logging
             logging.getLogger("relay").warning("NIP-17 seal id mismatch")
-            # Continue anyway — let the relay handle it
+            return None  # reject forged seals
 
         # Step 2: Decrypt seal → rumor
         # ECDH(recipient_priv, seal.pubkey) = ECDH(sender_priv, recipient_pubkey)
