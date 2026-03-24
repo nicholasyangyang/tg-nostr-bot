@@ -109,13 +109,15 @@ class WSClient:
                     asyncio.create_task(self._safe_callback(msg))
             elif msg_type == "dm_received":
                 logger.debug("[WS] dm_received ack")
+            elif msg_type == "sent":
+                logger.debug("[WS] DM sent ack")
             else:
                 logger.warning("[WS] Unknown msg type: %s", msg_type)
 
     async def _ping_loop(self):
         """Send keepalive pings to prevent tunnel idle timeouts."""
         while self._running:
-            await asyncio.sleep(20)
+            await asyncio.sleep(15)  # Cloudflare tunnel ~50s idle timeout
             if not self._running or not self._ws:
                 break
             try:

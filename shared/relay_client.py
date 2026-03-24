@@ -90,8 +90,11 @@ class RelayConnection:
                 "limit": 0,
             }
         }
-        await self.ws.send(json.dumps(["REQ", self._sub_id, subscription["subscription"]]))
-        logger.info(f"[Relay] Subscribed to DMs for {len(pubkeys)} pubkeys (hex), since={self._t0}, limit=0")
+        try:
+            await self.ws.send(json.dumps(["REQ", self._sub_id, subscription["subscription"]]))
+            logger.info(f"[Relay] Subscribed to DMs for {len(pubkeys)} pubkeys (hex), since={self._t0}, limit=0")
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning(f"[Relay] subscribe failed: connection closed for {self.relay_url}")
 
     async def listen(self):
         """Listen for events from the relay."""
