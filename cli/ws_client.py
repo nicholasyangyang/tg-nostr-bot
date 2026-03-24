@@ -15,6 +15,7 @@ class WSClient:
         self.on_message = on_message  # callback(msg: dict)
         self._ws = None
         self._running = False
+        self._npub = ""  # stored after registration for reconnect and send_dm
 
     async def connect_and_register(self) -> bool:
         """Connect WS, handle key registration, return True on success."""
@@ -60,6 +61,7 @@ class WSClient:
         await self._ws.send(json.dumps({"type": "register", "npub": npub}))
         resp = json.loads(await self._ws.recv())
         if resp.get("type") == "registered":
+            self._npub = npub
             logger.info(f"[WS] Registered: {npub[:30]}...")
         else:
             logger.error(f"[WS] Unexpected: {resp}")
@@ -93,23 +95,29 @@ class WSClient:
                 # Try to reconnect
                 try:
                     self._ws = await websockets.connect(self.gateway_url)
-                    # Re-register
-                    npub = ""
-                    if Path(KEY_PATH).exists():
-                        try:
-                            with open(KEY_PATH) as f:
-                                npub = json.load(f).get("npub", "")
-                        except Exception:
-                            pass
-                    if npub:
-                        await self._ws.send(json.dumps({"type": "register", "npub": npub}))
+                    # Re-register using stored npub
+                    if self._npub:
+                        await self._ws.send(json.dumps({"type": "register", "npub": self._npub}))
                         resp = json.loads(await self._ws.recv())
                         if resp.get("type") == "registered":
                             logger.info("[WS] Reconnected and registered")
                         else:
                             logger.warning("[WS] Reconnect register unexpected response")
                     else:
-                        logger.warning("[WS] No npub for reconnection")
+                        logger.warning("[WS] No npub for reconnection, requesting new key")
+                        await self._ws.send(json.dumps({"type": "register_request"}))
+                        resp = json.loads(await self._ws.recv())
+                        if resp.get("type") == "register_done":
+                            self._npub = resp["npub"]
+                            nsec = resp["nsec"]
+                            Path(KEY_PATH).parent.mkdir(parents=True, exist_ok=True)
+                            with open(KEY_PATH, "w") as f:
+                                json.dump({"npub": self._npub, "nsec": nsec}, f)
+                            await self._ws.send(json.dumps({"type": "register", "npub": self._npub}))
+                            resp = json.loads(await self._ws.recv())
+                            logger.info("[WS] Reconnected with new key")
+                        else:
+                            logger.warning("[WS] Reconnect register_request unexpected response")
                 except Exception as e2:
                     logger.error(f"[WS] Reconnect failed: {e2}, retrying in 10s...")
                     await asyncio.sleep(10)
@@ -128,8 +136,16 @@ class WSClient:
         """Fire-and-forget send DM. Must be called from async context."""
         if not self._ws or not self._running:
             return
+        if not self._npub:
+            logger.warning("[WS] send_dm: not registered yet")
+            return
         try:
-            asyncio.create_task(self._ws.send(json.dumps({"type": "dm", "to_npub": to_npub, "content": content})))
+            asyncio.create_task(self._ws.send(json.dumps({
+                "type": "dm",
+                "from_npub": self._npub,
+                "to_npub": to_npub,
+                "content": content,
+            })))
         except Exception as e:
             logger.error(f"[WS] send_dm failed: {e}")
 

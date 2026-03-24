@@ -286,7 +286,7 @@ class WebSocketServer:
         client_id = self.handler.get_client_by_npub_hex(recipient_hex)
         if client_id:
             self.handler.send_to_client(client_id, {
-                "type": "dm_received",
+                "type": "dm",
                 "from_npub": sender_npub,
                 "to_npub": recipient_npub,
                 "content": plaintext,
