@@ -3,178 +3,117 @@ import time
 import os
 import hashlib
 import random
+import secrets
+import struct
+import base64
 from pathlib import Path
 
-# cryptography for ChaCha20-Poly1305 and HKDF
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+# cryptography for ChaCha20 and HKDF
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.hmac import HMAC as _HMAC
+from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 from cryptography.hazmat.backends import default_backend
 
 
-# ---- NIP-44 encryption helpers ----
+# ---- ECDH shared secret (secp256k1-native) ----
 
-def _ecdh_derive_shared_key(seckey_hex: str, pubkey_xonly_hex: str) -> bytes:
-    """ECDH shared secret using secp256k1 for point math, cryptography for ECDH.
+def _ecdh(priv_hex: str, pub_xonly_hex: str) -> bytes:
+    """ECDH shared secret using secp256k1 tweak_mul (same as reference).
 
-    seckey_hex: 32-byte hex string (or nsec bech32)
-    pubkey_xonly_hex: 32-byte hex x-only pubkey
-    Returns 32-byte raw ECDH shared secret (the x-coordinate).
+    priv_hex: 32-byte hex private key
+    pub_xonly_hex: 32-byte x-only OR 33-byte compressed hex public key
+    Returns 32-byte raw ECDH shared secret x-coordinate.
     """
-    from cryptography.hazmat.primitives.asymmetric.ec import (
-        SECP256K1, ECDH,
-        EllipticCurvePublicNumbers, EllipticCurvePrivateNumbers,
-    )
     import secp256k1
-
-    if seckey_hex.startswith("nsec1"):
-        seckey_hex = nsec_to_hex(seckey_hex)
-    priv_bytes = bytes.fromhex(seckey_hex)
-    pub_bytes = bytes.fromhex(pubkey_xonly_hex)
-
-    # Use secp256k1 to derive sender's full public key point from private key
-    sender_priv = secp256k1.PrivateKey(priv_bytes)
-    sender_pubkey_full = sender_priv.pubkey.serialize(compressed=False)  # 65 bytes
-    x_s = int.from_bytes(sender_pubkey_full[1:33], "big")
-    y_s = int.from_bytes(sender_pubkey_full[33:65], "big")
-
-    # Derive recipient's y from x (x-only pubkey)
-    p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-    x_r = int.from_bytes(pub_bytes, "big")
-    y_sq = (pow(x_r, 3, p) + 7) % p
-    y_r = pow(y_sq, (p + 1) // 4, p)
-    # Verify y is on curve; if not, flip to the other root
-    if pow(y_r, 2, p) != y_sq:
-        y_r = p - y_r
-
-    # Build private key with its public key for ECDH exchange
-    sender_pub_nums = EllipticCurvePublicNumbers(x_s, y_s, SECP256K1())
-    priv_nums = EllipticCurvePrivateNumbers(
-        int.from_bytes(priv_bytes, "big"), sender_pub_nums,
-    )
-    sender_key = priv_nums.private_key()
-    recipient_pub = EllipticCurvePublicNumbers(x_r, y_r, SECP256K1()).public_key()
-    return sender_key.exchange(ECDH(), recipient_pub)
-
-
-def _nip44_shared_secret(seckey: str, pubkey: str) -> bytes:
-    """Derive NIP-44 shared secret via ECDH + HKDF.
-
-    seckey: hex string (32 bytes) or nsec bech32
-    pubkey: hex string — x-only (32 bytes), compressed (33 bytes), or uncompressed (65 bytes)
-    Returns 32-byte shared secret.
-    """
-    # Convert pubkey to x-only hex
-    pubkey_bytes = bytes.fromhex(pubkey)
-    if len(pubkey_bytes) == 33:
-        # Compressed: strip prefix, keep x
-        pubkey_xonly = pubkey_bytes[1:].hex()
-    elif len(pubkey_bytes) == 65:
-        # Uncompressed: strip prefix (0x04), keep x (first 32 bytes after prefix)
-        pubkey_xonly = pubkey_bytes[1:33].hex()
+    pub_bytes = bytes.fromhex(pub_xonly_hex)
+    if len(pub_bytes) == 33:
+        pub_formatted = pub_bytes  # already has 0x02/0x03 prefix
     else:
-        # Already x-only
-        pubkey_xonly = pubkey
+        pub_formatted = bytes.fromhex("02" + pub_xonly_hex)  # add prefix for x-only
+    pk = secp256k1.PublicKey(pub_formatted, raw=True)
+    return pk.tweak_mul(
+        secp256k1.PrivateKey(bytes.fromhex(priv_hex)).private_key
+    ).serialize(compressed=True)[1:]
 
-    # Use secp256k1 library for ECDH (handles x-only natively)
-    shared = _ecdh_derive_shared_key(seckey, pubkey_xonly)
 
-    # NIP-44: HKDF-SHA512 with salt="nip04-v2", info="nip44-v2" → 32-byte secret
-    hkdf = HKDF(
-        algorithm=hashes.SHA512(),
-        length=32,
-        salt=b"nip04-v2",
-        info=b"nip44-v2",
-        backend=default_backend(),
-    )
-    return hkdf.derive(shared)
+# ---- NIP-44 encryption (reference implementation) ----
+
+def _nip44_conv_key(priv: str, pub: str) -> bytes:
+    """HKDF-Extract(salt="nip44-v2", IKM=ecdh_x) — matches reference."""
+    h = _HMAC(b"nip44-v2", SHA256(), backend=default_backend())
+    h.update(_ecdh(priv, pub))
+    return h.finalize()
+
+
+def _nip44_pad_len(l: int) -> int:
+    """Pad length to 32-byte chunk boundaries."""
+    if l <= 32:
+        return 32
+    np = 1 << (l - 1).bit_length()
+    chunk = max(np // 8, 32)
+    return chunk * ((l - 1) // chunk + 1)
 
 
 def nip44_encrypt(plaintext: str, sender_priv: str, receiver_pub: str) -> str:
-    """NIP-44 encrypt: ChaCha20-Poly1305.
+    """NIP-44 encrypt: ChaCha20 + HMAC-SHA256 (reference algorithm).
 
-    plaintext: raw string
-    sender_priv: hex seckey (or nsec bech32)
-    receiver_pub: hex (x-only/compressed/uncompressed) or bech32 npub
-    Returns base64-encoded ciphertext: version(0x02) || sender_pub(33) || nonce(12) || ct+tag
+    Matches: ref_nip44_enc() in the reference implementation.
     """
-    from base64 import b64encode
-
-    # Convert receiver_pub to hex if bech32 npub
+    # Normalize keys
+    if sender_priv.startswith("nsec1"):
+        sender_priv = nsec_to_hex(sender_priv)
     if receiver_pub.startswith("npub1"):
         receiver_pub = npub_to_hex(receiver_pub)
 
-    # Convert sender_priv to hex if bech32
-    if sender_priv.startswith("nsec1"):
-        sender_priv = nsec_to_hex(sender_priv)
+    ck = _nip44_conv_key(sender_priv, receiver_pub)
+    nonce = secrets.token_bytes(32)
+    keys = HKDFExpand(SHA256(), 76, nonce, default_backend()).derive(ck)
+    ck2, cn, hk = keys[:32], keys[32:44], keys[44:]
 
-    # Full 33-byte pubkey for sender (needed for embedding in ciphertext)
-    sender_pub_bytes = _pubkey_from_priv(sender_priv)  # 33 bytes: 0x02/0x03 || x
-    shared = _nip44_shared_secret(sender_priv, receiver_pub)
-    chacha = ChaCha20Poly1305(shared)
+    plain = plaintext.encode()
+    pl = _nip44_pad_len(len(plain))
+    padded = struct.pack('>H', len(plain)) + plain + b'\x00' * (pl - len(plain))
 
-    nonce = os.urandom(12)  # 12-byte nonce for ChaCha20
-    # Plaintext = sender_pub (33 bytes) || content bytes
-    pt = sender_pub_bytes + plaintext.encode("utf-8")
+    enc = Cipher(algorithms.ChaCha20(ck2, b'\x00\x00\x00\x00' + cn),
+                 None, default_backend()).encryptor()
+    ct = enc.update(padded) + enc.finalize()
 
-    ct = chacha.encrypt(nonce, pt, None)
-    # Output: version(0x02) || sender_pub(33) || nonce(12) || ciphertext+tag
-    return b64encode(bytes([0x02]) + sender_pub_bytes + nonce + ct).decode()
+    hm = _HMAC(hk, SHA256(), backend=default_backend())
+    hm.update(nonce + ct)
+    return base64.b64encode(b'\x02' + nonce + ct + hm.finalize()).decode()
 
 
 def nip44_decrypt(ciphertext_b64: str, my_priv: str, sender_pub: str) -> str:
-    """NIP-44 decrypt: ChaCha20-Poly1305.
+    """NIP-44 decrypt: ChaCha20 + HMAC-SHA256 (reference algorithm).
 
-    ciphertext_b64: base64 string (version || sender_pub || nonce || ct)
-    my_priv: hex seckey (or nsec bech32)
-    sender_pub: hex or bech32 npub — ignored, extracted from ciphertext
-    Returns plaintext string.
+    Matches: ref_nip44_dec() in the reference implementation.
+    Raises ValueError on bad MAC or version.
     """
-    from base64 import b64decode
-
-    data = b64decode(ciphertext_b64)
-    if data[0] != 0x02:
-        raise ValueError(f"Unknown NIP-44 version: {data[0]}")
-
-    sender_pub_embedded = data[1:34]  # 33 bytes full pubkey
-    nonce = data[34:46]
-    ct = data[46:]
-
-    # Convert my_priv to hex if bech32
     if my_priv.startswith("nsec1"):
         my_priv = nsec_to_hex(my_priv)
+    if sender_pub.startswith("npub1"):
+        sender_pub = npub_to_hex(sender_pub)
 
-    # Extract x-only from embedded pubkey for ECDH
-    sender_pub_x = sender_pub_embedded[1:].hex()
-    shared = _nip44_shared_secret(my_priv, sender_pub_x)
-    chacha = ChaCha20Poly1305(shared)
+    raw = base64.b64decode(ciphertext_b64)
+    if raw[0] != 2:
+        raise ValueError(f"Unsupported NIP-44 version: {raw[0]}")
+    nonce, ct, mac = raw[1:33], raw[33:-32], raw[-32:]
 
-    pt = chacha.decrypt(nonce, ct, None)
-    # Skip embedded sender_pub (33 bytes)
-    return pt[33:].decode("utf-8")
+    ck = _nip44_conv_key(my_priv, sender_pub)
+    keys = HKDFExpand(SHA256(), 76, nonce, default_backend()).derive(ck)
+    ck2, cn, hk = keys[:32], keys[32:44], keys[44:]
 
+    hm = _HMAC(hk, SHA256(), backend=default_backend())
+    hm.update(nonce + ct)
+    if not secrets.compare_digest(mac, hm.finalize()):
+        raise ValueError("NIP-44 bad MAC")
 
-def _pubkey_from_priv(seckey_hex: str) -> bytes:
-    """Get full 33-byte secp256k1 pubkey (prefix || x) from seckey.
-
-    For ECDH: use full point so recipient can extract x-coordinate.
-    Returns 33 bytes: 0x02/0x03 || x (32 bytes).
-    """
-    import secp256k1
-    if seckey_hex.startswith("nsec1"):
-        seckey_hex = nsec_to_hex(seckey_hex)
-    if len(seckey_hex) == 64:
-        pk = secp256k1.PrivateKey(bytes.fromhex(seckey_hex))
-    else:
-        pk = secp256k1.PrivateKey()
-    return pk.pubkey.serialize()  # 33 bytes: 0x02/0x03 || x (32 bytes)
-
-
-def _x_only(pubkey_bytes: bytes) -> bytes:
-    """Return x-only 32-byte pubkey from full 33-byte serialized pubkey."""
-    if len(pubkey_bytes) == 33:
-        return pubkey_bytes[1:]  # strip prefix, keep x
-    return pubkey_bytes  # already x-only
+    dec = Cipher(algorithms.ChaCha20(ck2, b'\x00\x00\x00\x00' + cn),
+                 None, default_backend()).decryptor()
+    padded = dec.update(ct) + dec.finalize()
+    l = struct.unpack('>H', padded[:2])[0]
+    return padded[2:2 + l].decode()
 
 
 # ---- Nostr key management ----
@@ -507,5 +446,6 @@ def decrypt_nip17(ciphertext_b64: str, seckey: str, pubkey: str) -> str:
 
 
 def _shared_key(seckey: str, pubkey: str) -> bytes:
-    """Legacy ECDH shared secret (SHA256 of ECDH result)."""
-    return _nip44_shared_secret(seckey, pubkey)
+    """Legacy alias for _nip44_conv_key."""
+    return _nip44_conv_key(seckey, pubkey)
+
