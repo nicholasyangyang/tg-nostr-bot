@@ -1,13 +1,11 @@
 # tg-nostr-bot — Design Spec
 
 **Date:** 2026-03-24
-**Status:** Draft
+**Status:** Approved
 
 ## Overview
 
 A Telegram-Nostr bridge. Each CLI instance bridges a Telegram Bot to the Nostr network. The Gateway acts as a WebSocket message router and relay pool manager. Multiple CLI instances can connect to a single Gateway, each with an independent npub.
-
-If UDP hole punching fails, the program exits cleanly.
 
 ## Architecture
 
@@ -33,7 +31,9 @@ If UDP hole punching fails, the program exits cleanly.
 - Manages `all_key.json` with all registered npub/nsec pairs
 - Accepts WebSocket connections from multiple CLI instances
 - Subscribes to Nostr relays (kind:1059) for each registered npub on demand
-- Routes messages: decrypts incoming NIP-17 DM, extracts `to_npub`, forwards to the corresponding CLI
+- Maintains a `npub → WebSocket client` mapping for routing
+- Routes messages: decrypts incoming NIP-17 DM, extracts `to_npub`, looks up the corresponding WS client and forwards
+- If `to_npub` has no registered WS client → log warning, drop message
 - Forwards outgoing messages from CLI to relays
 
 **CLI:**
@@ -77,10 +77,10 @@ tg-nostr-bot/
 1. Load `.env` (BOT_TOKEN, GATEWAY_WS_URL, MSG_TO, PORT, ALLOWED_USERS)
 2. Check local `key.json`:
    - Exists → load npub/nsec
-   - Missing → connect to Gateway WS, send `{"type":"register_request"}`, receive `{"type":"register_done","npub":"...","nsec":"..."}`, save to `key.json`
-3. Connect to Gateway WS, send `{"type":"register","npub":"<npub>"}`
-4. Gateway subscribes relay for this npub (kind:1059)
-5. Start FastAPI webhook server
+   - Missing → open one WS connection to Gateway, send `{"type":"register_request"}`, receive `{"type":"register_done","npub":"...","nsec":"..."}`, **save to `key.json`**, **reuse same WS connection** for next step
+3. On the same WS connection, send `{"type":"register","npub":"<npub>"}`
+4. Gateway adds this npub to its routing map and subscribes relay for kind:1059 targeting this npub
+5. Start FastAPI webhook server on `POST /webhook`
 
 ### Gateway Startup
 
@@ -93,40 +93,60 @@ tg-nostr-bot/
 ### Outgoing Message (TG → Nostr)
 
 ```
-Telegram webhook → CLI app.py → nip17_client.wrap(plaintext, my_nsec, MSG_TO_npub)
-  → ws_client → Gateway → relay_client.publish(gift_wrap_event)
+Telegram webhook (POST /webhook) → CLI app.py
+  → nip17_client.wrap(plaintext, my_nsec, MSG_TO_npub)
+  → ws_client.send({"type": "dm", "to_npub": "...", "content": "..."})
+  → Gateway → relay_client.publish(gift_wrap_event)
 ```
+
+`app.py` calls `ws_client.send_dm(to_npub, content)` directly (same process, async). The WS connection is held open for the lifetime of the CLI.
 
 ### Incoming Message (Nostr → TG)
 
 ```
 relay_client receives kind:1059 → key_manager.nip17_unwrap(seckey, event)
-  → extract to_npub → websocket_server route to CLI by npub
-  → ws_client receives → nip17_client.unwrap() → app.py → tg_api.sendMessage()
+  → extract to_npub → websocket_server looks up npub→WS client map
+  → send {"type": "dm", ...} to that WS client
+  → CLI ws_client receives → nip17_client.unwrap()
+  → app.py → Telegram Bot API sendMessage(chat_id, text)
 ```
 
 ## WebSocket Protocol
 
+> **Security note:** `register_request` returns `nsec` over WS. This is acceptable because the Gateway and CLI communicate over a trusted network (localhost or private network). In production, ensure the GATEWAY_WS_URL uses `127.0.0.1` or a trusted LAN address.
+
 ### CLI → Gateway
 
 ```json
-// Registration
+// Key request (only if key.json is missing locally)
 {"type": "register_request"}
+
+// Register this CLI's npub and subscribe relay for it
 {"type": "register", "npub": "npub1..."}
 
-// Outgoing DM
+// Send a DM to Nostr
 {"type": "dm", "to_npub": "npub1...", "content": "hello"}
 ```
 
 ### Gateway → CLI
 
 ```json
-// Registration confirmation (only on register_request)
+// Key response: returns newly generated npub/nsec
 {"type": "register_done", "npub": "npub1...", "nsec": "nsec1..."}
 
-// Incoming DM (decrypted)
+// Incoming DM: decrypted NIP-17 message from Nostr relay
 {"type": "dm", "from_npub": "npub1...", "to_npub": "npub1...", "content": "hello"}
 ```
+
+### Gateway-side Routing
+
+Gateway maintains: `Dict[npub_hex, WebSocketClient]`
+
+When `register` arrives: add mapping `npub → client`, subscribe `kind:1059` events where `#p = npub_hex`.
+When receiving a kind:1059 event from relay:
+1. Look up `to_npub` (from `#p` tag)
+2. If `npub` in map → forward to that client
+3. Else → log warning "no client for {npub}, dropping"
 
 ## Configuration
 
@@ -153,15 +173,17 @@ MSG_TO=npub1...    # default destination npub for incoming TG messages
 LOG_LEVEL=INFO
 ```
 
-## Reuse from Existing Code
+## Shared Modules (from py_gateway / tg_bot)
 
-| Component | Source | Notes |
-|-----------|--------|-------|
-| NIP-44 encrypt/decrypt | py_gateway/key_manager.py | ChaCha20-Poly1305 |
+These modules are copied/adapted from existing projects into `tg-nostr-bot`:
+
+| Module | Source | Notes |
+|--------|--------|-------|
+| NIP-44 encrypt/decrypt | py_gateway/key_manager.py | XChaCha20-Poly1305 (NIP-44 spec) |
 | NIP-17 Gift Wrap | py_gateway/key_manager.py | nip17_wrap_message, nip17_unwrap |
 | Relay pool | py_gateway/relay_client.py | Connect, subscribe, publish |
-| WS Server | py_gateway/websocket_server.py | Adapt for CLI registration |
-| FastAPI Webhook | tg_bot/main.py | Adapt for CLI app |
+| WS Server | py_gateway/websocket_server.py | Adapt for CLI registration + routing |
+| FastAPI Webhook pattern | tg_bot/main.py | Adapt for CLI app |
 | .env loader | Both | python-dotenv |
 
 ## Dependencies
@@ -194,4 +216,7 @@ cryptography
 - CLI: WS connection failure → retry 3 times, then exit(1)
 - Telegram API failure → error log, continue
 - NIP-17 unwrap failure → skip message, log warning
-- Missing key.json on startup → request from Gateway, retry once on failure
+- Missing `key.json` on startup → request from Gateway, retry once on failure
+- `all_key.json` corruption/malformed JSON → treat as empty, regenerate
+- Duplicate `register` for same npub → replace old WS client mapping (graceful reconnect)
+- WS ping/pong: Gateway sends ping every 30s; if pong not received in 10s → close client connection
