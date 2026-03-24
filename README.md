@@ -70,17 +70,14 @@ cd cli && pip install -r requirements.txt && cd ..
 
 ```bash
 cp gateway/.env.example gateway/.env
-# 编辑 .env，配置 CWD_DIR、GATEWAY_HOST、GATEWAY_PORT、NOSTR_RELAYS
+# 编辑 .env，配置 GATEWAY_HOST、GATEWAY_PORT、NOSTR_RELAYS
 ```
 
-> **CWD_DIR**：必填。指定存放 `all_key.json` 的目录路径（建议使用绝对路径）。
+> **注意**：`--cwd-dir` 是启动命令参数，不是环境变量。
 
 `.env.example` 默认值：
 
 ```env
-# 数据目录（存放 all_key.json）
-CWD_DIR=/path/to/gateway-data
-
 GATEWAY_HOST=127.0.0.1
 GATEWAY_PORT=7899
 NOSTR_RELAYS=wss://relay.damus.io,wss://relay.0xchat.com,wss://nostr.oxtr.dev,wss://relay.primal.net
@@ -91,17 +88,14 @@ LOG_LEVEL=INFO
 
 ```bash
 cp cli/.env.example cli/.env
-# 编辑 .env，填入 CWD_DIR、BOT_TOKEN、WEBHOOK_URL、MSG_TO 等
+# 编辑 .env，填入 BOT_TOKEN、WEBHOOK_URL、MSG_TO 等
 ```
 
-> **CWD_DIR**：必填。指定存放 `key.json` 的目录路径（建议使用绝对路径）。
+> **注意**：`--cwd-dir` 是启动命令参数，不是环境变量。
 
 `.env.example`：
 
 ```env
-# 数据目录（存放 key.json）
-CWD_DIR=/path/to/cli-data
-
 BOT_TOKEN=your_telegram_bot_token
 WEBHOOK_URL=https://your-domain.com/bot
 ALLOWED_USERS=123456789,987654321
