@@ -64,7 +64,6 @@ async def lifespan(app: FastAPI):
     global _state
     if _state is None:
         raise RuntimeError("AppState not initialized. Set cli.app._state before running uvicorn.")
-    _state = _state  # Keep the pre-initialized state
 
     async def on_dm(msg: dict):
         if not _state:
