@@ -73,6 +73,20 @@ class WSClient:
         """Listen for messages from Gateway, auto-reconnect on disconnect."""
         self._running = True
         reconnect_attempts = 0
+
+        async def client_ping_loop():
+            """Send keepalive pings to Gateway to prevent tunnel idle timeouts."""
+            while self._running:
+                await asyncio.sleep(20)
+                if not self._running or not self._ws:
+                    break
+                try:
+                    await self._ws.send(json.dumps({"type": "ping"}))
+                except Exception:
+                    break
+
+        ping_task = asyncio.create_task(client_ping_loop())
+
         while self._running:
             try:
                 async for raw in self._ws:

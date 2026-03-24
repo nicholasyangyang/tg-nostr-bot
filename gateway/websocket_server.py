@@ -142,6 +142,9 @@ class GatewayMessageHandler:
             return self._handle_register(msg)
         elif msg_type == "dm":
             return self._handle_dm(msg)
+        elif msg_type == "ping":
+            # CLI keepalive ping — respond with pong to prevent tunnel idle timeouts
+            return {"type": "pong"}
         return {"type": "error", "error": f"Unknown message type: {msg_type}"}
 
     def _handle_register_request(self, msg: dict) -> dict:
