@@ -18,13 +18,11 @@ class WSClient:
         self.on_message = on_message  # callback(msg: dict)
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
-        self._npub = ""  # stored after registration for reconnect and send_dm
-        self._listener_task: Optional[asyncio.Task] = None
-        self._ping_task: Optional[asyncio.Task] = None
+        self._npub = ""
+        self._msg_queue: asyncio.Queue[dict] = asyncio.Queue()
 
     async def connect_and_register(self) -> bool:
         """Connect WS, handle key registration, return True on success."""
-        # Connect with retry
         for attempt in range(3):
             try:
                 self._ws = await websockets.connect(self.gateway_url)
@@ -36,7 +34,6 @@ class WSClient:
             logger.error("[WS] Could not connect to Gateway")
             return False
 
-        # Load local key if exists
         npub = ""
         if Path(KEY_PATH).exists():
             try:
@@ -46,9 +43,7 @@ class WSClient:
             except Exception:
                 pass
 
-        # Register
         if not npub:
-            # Request new key from gateway
             await self._ws.send(json.dumps({"type": "register_request"}))
             resp = json.loads(await self._ws.recv())
             if resp.get("type") == "register_done":
@@ -62,7 +57,6 @@ class WSClient:
                 logger.error(f"[WS] Unexpected: {resp}")
                 return False
 
-        # Register npub
         await self._ws.send(json.dumps({"type": "register", "npub": npub}))
         resp = json.loads(await self._ws.recv())
         if resp.get("type") == "registered":
@@ -74,8 +68,52 @@ class WSClient:
 
         return True
 
+    async def _producer(self):
+        """Receive from Gateway, put raw messages into queue. Never blocks caller."""
+        while self._running and self._ws:
+            try:
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
+                msg = json.loads(raw)
+                await self._msg_queue.put(msg)
+                logger.debug("[WS] Enqueued msg type=%s", msg.get("type"))
+            except asyncio.TimeoutError:
+                # No message in 5s — loop continues, check _running
+                continue
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("[WS] Connection closed in producer")
+                break
+            except Exception as e:
+                logger.warning("[WS] Producer error: %s", e)
+                await asyncio.sleep(1)
+
+    async def _consumer(self):
+        """Consume from queue, dispatch messages. Never blocks producer."""
+        while self._running:
+            try:
+                msg = await asyncio.wait_for(self._msg_queue.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue
+
+            msg_type = msg.get("type", "")
+            logger.debug("[WS] Consuming msg type=%s", msg_type)
+
+            if msg_type == "pong":
+                continue
+            elif msg_type == "ping":
+                if self._ws:
+                    asyncio.create_task(self._ws.send(json.dumps({"type": "pong"})))
+            elif msg_type == "dm":
+                logger.info("[WS] DM from=%s content=%s",
+                           msg.get("from_npub", "")[:20], msg.get("content", "")[:50])
+                if self.on_message:
+                    asyncio.create_task(self._safe_callback(msg))
+            elif msg_type == "dm_received":
+                logger.debug("[WS] dm_received ack")
+            else:
+                logger.warning("[WS] Unknown msg type: %s", msg_type)
+
     async def _ping_loop(self):
-        """Send keepalive pings to Gateway to prevent tunnel idle timeouts."""
+        """Send keepalive pings to prevent tunnel idle timeouts."""
         while self._running:
             await asyncio.sleep(20)
             if not self._running or not self._ws:
@@ -87,79 +125,56 @@ class WSClient:
                 logger.warning("[WS] Ping failed: %s", e)
                 break
 
-    async def _listener_loop(self):
-        """Listen for messages from Gateway. Non-blocking — processes each message and continues."""
-        logger.debug("[WS] Listener loop started")
-        while self._running:
-            ws = self._ws
-            if not ws:
-                logger.debug("[WS] Listener: _ws is None, waiting 1s")
-                await asyncio.sleep(1)
-                continue
-
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
-            except asyncio.TimeoutError:
-                # No message in 5s, loop back to check _running
-                continue
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("[WS] Connection closed, listener exiting")
-                break
-            except Exception as e:
-                logger.warning("[WS] Listener error: %s", e)
-                await asyncio.sleep(1)
-                continue
-
-            # Process message
-            try:
-                msg = json.loads(raw)
-                msg_type = msg.get("type", "")
-                logger.debug("[WS] msg type=%s", msg_type)
-
-                if msg_type == "pong":
-                    continue
-                elif msg_type == "ping":
-                    await self._ws.send(json.dumps({"type": "pong"}))
-                elif msg_type == "dm":
-                    logger.info("[WS] DM from=%s content=%s",
-                               msg.get("from_npub", "")[:20], msg.get("content", "")[:50])
-                    if self.on_message:
-                        asyncio.create_task(self._safe_callback(msg))
-                elif msg_type == "dm_received":
-                    logger.debug("[WS] dm_received ack")
-            except Exception as e:
-                logger.error("[WS] Error processing msg: %s", e)
-
-        logger.debug("[WS] Listener loop exited")
-
     async def run(self):
-        """Start background listener and ping tasks. Non-blocking."""
+        """Start background tasks. Producer auto-reconnects on disconnect."""
         self._running = True
-        self._ping_task = asyncio.create_task(self._ping_loop())
-        self._listener_task = asyncio.create_task(self._listener_loop())
-        logger.debug("[WS] run() started, listener=%s ping=%s",
-                     self._listener_task, self._ping_task)
+        asyncio.create_task(self._producer_with_reconnect())
+        asyncio.create_task(self._consumer())
+        asyncio.create_task(self._ping_loop())
+        logger.debug("[WS] run() spawned 3 background tasks")
+
+    async def _producer_with_reconnect(self):
+        """Producer with auto-reconnect: restart producer whenever it exits."""
+        reconnect_delay = 2
+        while self._running:
+            # Run producer until it exits (connection close, error, etc.)
+            await self._producer()
+            if not self._running:
+                break
+            # Connection dropped — reconnect
+            logger.warning("[WS] Producer exited, reconnecting in %ds...", reconnect_delay)
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 30)
+            if not self._running:
+                break
+            try:
+                self._ws = await websockets.connect(self.gateway_url)
+                if self._npub:
+                    await self._ws.send(json.dumps({"type": "register", "npub": self._npub}))
+                    resp = json.loads(await self._ws.recv())
+                    if resp.get("type") == "registered":
+                        reconnect_delay = 2  # reset on success
+                        logger.info("[WS] Reconnected and registered")
+                    else:
+                        logger.warning("[WS] Reconnect register unexpected response")
+            except Exception as e:
+                logger.warning("[WS] Reconnect failed: %s", e)
 
     async def disconnect(self):
-        """Stop all tasks and close connection."""
+        """Stop everything and close connection."""
         self._running = False
-        if self._ping_task:
-            self._ping_task.cancel()
-            try:
-                await self._ping_task
-            except asyncio.CancelledError:
-                pass
-        if self._listener_task:
-            self._listener_task.cancel()
-            try:
-                await self._listener_task
-            except asyncio.CancelledError:
-                pass
         if self._ws:
-            ws = self._ws
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
             self._ws = None
-            await ws.close()
-        logger.debug("[WS] disconnected")
+        # Drain queue
+        while not self._msg_queue.empty():
+            try:
+                self._msg_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
     async def _safe_callback(self, msg: dict):
         try:
@@ -169,7 +184,7 @@ class WSClient:
             logger.error("[WS] on_message error: %s", e)
 
     def send_dm(self, to_npub: str, content: str):
-        """Fire-and-forget send DM. Must be called from async context."""
+        """Fire-and-forget send DM. Non-blocking."""
         if not self._ws or not self._running:
             logger.warning("[WS] send_dm: not connected or not running")
             return
