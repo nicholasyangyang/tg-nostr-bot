@@ -366,8 +366,8 @@ class WebSocketServer:
                     continue
 
                 # Check pong timeout AFTER pong processing.
-                # Only fires if no message (including pong) was received for >10s.
-                if time.time() - last_ping > 10:
+                # CLI pings every 15s, so give 35s window before disconnecting.
+                if time.time() - last_ping > 35:
                     logger.warning(f"[Gateway] Client {client_id} pong timeout")
                     break
 
