@@ -83,12 +83,16 @@ class WSClient:
                 await asyncio.sleep(20)
                 if not self._running:
                     break
-                ws = self._ws
-                if not ws:
+                if not self._ws:
                     break
                 try:
-                    await ws.send(json.dumps({"type": "ping"}))
-                except Exception:
+                    await self._ws.send(json.dumps({"type": "ping"}))
+                    logger.debug("[WS] Ping sent")
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning("[WS] Ping: connection closed, exiting ping loop")
+                    break
+                except Exception as e:
+                    logger.warning("[WS] Ping failed: %s, exiting ping loop", e)
                     break
 
         try:
@@ -129,6 +133,14 @@ class WSClient:
                             if resp.get("type") == "registered":
                                 reconnect_attempts = 0
                                 logger.info("[WS] Reconnected and registered")
+                                # Restart ping loop for the new connection
+                                if ping_task and not ping_task.done():
+                                    ping_task.cancel()
+                                    try:
+                                        await ping_task
+                                    except asyncio.CancelledError:
+                                        pass
+                                ping_task = asyncio.create_task(client_ping_loop())
                             else:
                                 logger.warning("[WS] Reconnect register unexpected response")
                         else:
@@ -144,6 +156,14 @@ class WSClient:
                                 await self._ws.send(json.dumps({"type": "register", "npub": self._npub}))
                                 resp = json.loads(await self._ws.recv())
                                 logger.info("[WS] Reconnected with new key")
+                                # Restart ping loop for the new connection
+                                if ping_task and not ping_task.done():
+                                    ping_task.cancel()
+                                    try:
+                                        await ping_task
+                                    except asyncio.CancelledError:
+                                        pass
+                                ping_task = asyncio.create_task(client_ping_loop())
                             else:
                                 logger.warning("[WS] Reconnect register_request unexpected response")
                     except Exception as e2:
